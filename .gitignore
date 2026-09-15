@@ -1,0 +1,33 @@
+.build/
+.swiftpm/
+dist/
+.DS_Store
+__pycache__/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.plist
+.ssh/
+id_rsa*
+id_ed25519*
+id_ecdsa*
+known_hosts*
+authorized_keys*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Diagnostics may contain hostnames, IPs, commands, and model names
+*.log
+*.cast
+*.sqlite*
+diagnostics/
+captures/
+screenshots/
+homelab-preview*/
+*.xcuserstate
+xcuserdata/
