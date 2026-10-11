@@ -1,12 +1,12 @@
 # my-homelab
 
-A native dashboard for monitoring your Linux server from macOS. View system resources, NVIDIA GPU metrics, Ollama models, and services, or open an SSH session — from the main window or directly from the menu bar.
+A native dashboard for monitoring your Linux server from macOS. View system resources, NVIDIA GPU metrics, Ollama models, and services, manage libvirt virtual machines and open their desktops in one click, or open an SSH session, from the main window or directly from the menu bar.
 
 Built with **SwiftUI, AppKit, Swift Charts, and SwiftTerm**. Interface in Brazilian Portuguese. No web interface and no agent to install on the server.
 
-![Homelab dashboard illustration showing system resources, GPU metrics, and services](docs/images/dashboard.svg)
+![Homelab server screen with CPU, RAM, disk, uptime, activity chart, services, GPU, and Ollama](docs/images/server.png)
 
-*Illustration with example data. No real server information is shown.*
+*Screenshots of the real app. The connection uses an `~/.ssh/config` alias, so no IP address or username appears.*
 
 ## Features
 
@@ -39,6 +39,12 @@ The `nvidia-smi` and `nvtop` commands supply data to native components; their ra
 Unavailable optional services are reported without blocking the rest of the dashboard.
 
 ## Getting started
+
+### Download
+
+Download `Homelab-vX.Y.Z-macOS.zip` from the [latest release](https://github.com/joaoantoniocoelho/my-homelab/releases/latest), unzip it, and move `Homelab.app` to **Applications**. The app has an ad hoc signature and is not notarized by Apple: open it the first time with right-click → **Open**.
+
+### Build from source
 
 ```sh
 git clone https://github.com/joaoantoniocoelho/my-homelab.git
@@ -95,9 +101,14 @@ Each group runs independent collections, with timeouts and no overlapping reques
 - **Power button / `⌘Q`:** quits the application and closes its connections.
 - **`⌘1` through `⌘6`:** switch between the main window's screens.
 
-In the menu bar, the GPU, Ollama, and services cards open their detail screens. The footer provides refresh, pause, main dashboard, terminal, settings, and quit controls.
+In the menu bar, the GPU, Ollama, and services cards open their detail screens. Each VM has a row with its state and an **Open desktop** button; the row is hidden when there are no VMs. The footer provides refresh, pause, main dashboard, terminal, settings, and quit controls.
 
 ## Virtual machines
+
+<p>
+  <img src="docs/images/vms.png" alt="VMs screen showing a shut-off Kali VM with vCPUs, memory, disk, readiness, and the Open desktop, Terminal SSH, and Start buttons" width="68%">
+  <img src="docs/images/menubar.png" alt="Menu bar dashboard with CPU, RAM, GPU, services, and a VM row with its state and an Open desktop button" width="26%">
+</p>
 
 The **VMs** screen lists every libvirt domain on `qemu:///system`. Nothing is hardcoded to a specific VM; each one gets its own settings (menu **⋯ → Configurar…**). Discovery reuses the monitoring SSH connection: a small Python helper (`vm.py`, sent like the collector and never installed) runs `virsh` on the server. The list refreshes every 15 s while monitoring is active, with one SSH process per refresh. The menu bar shows a row per VM with its state and an **Open desktop** button.
 
@@ -158,6 +169,8 @@ Closing the RDP client or Homelab **never** shuts down a VM. Shutdown is always 
 2. **If the guest asks for a password** (the default on Kali), the card offers **Type password in terminal**. A tab of the app's terminal runs `sudo systemctl poweroff` in the guest. You type the password straight into `sudo`; it is not stored or logged. The app keeps watching libvirt until the VM is off.
 3. **If the guest's SSH does not answer,** an ACPI request (`virsh shutdown --mode acpi`) is sent. Some guests, such as desktops whose power-button action is "ask", ignore it.
 4. **Force shutdown** (`virsh destroy`) is available only from the ⋯ menu, or after a failed shutdown, with a confirmation. It is equivalent to pulling the plug.
+
+Once a shutdown is requested, the VM shows as **Desligando** until libvirt reports it off. Guests can take minutes to stop, and their SSH and RDP services go down first; during that time the readiness indicators show `—`, and start/desktop actions are disabled. If the app's wait expires, the list keeps watching and switches to **Desligada** when the VM stops.
 
 **Restart** is a safe shutdown followed by a start. If the password step is needed, the start resumes once the VM is off.
 
@@ -247,7 +260,7 @@ This routine captures only the app's own screens, opens an SSH session, and chec
 
 ## Privacy and local files
 
-- The repository's default configuration contains no IP address, SSH username, or credentials for a specific server.
+- The repository's default configuration contains no IP address, SSH username, or credentials for a specific server. The screenshots in `docs/images/` were reviewed for that too.
 - Connection preferences are stored in macOS `UserDefaults`, outside the project. Metric history stays in memory.
 - VM settings live in `UserDefaults`; the generated `.rdp` files and the tunnel PID records live in `~/Library/Application Support/Homelab/`, and none of them contains credentials.
 - The collector accesses the Ollama API through the server's loopback interface; it does not need to be exposed on the network.
