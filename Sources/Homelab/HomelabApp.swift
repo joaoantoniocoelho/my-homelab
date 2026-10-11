@@ -13,6 +13,11 @@ import HomelabCore
                         print("\(group.rawValue): \(snapshot.hostname) · GPU \(snapshot.gpus.count) · serviços \(snapshot.services.count) · uptime \(snapshot.uptime ?? 0)")
                         if !snapshot.warnings.isEmpty { print(snapshot.warnings.joined(separator: "\n")) }
                     }
+                    // Read-only: lists domains and probes readiness, never starts or stops anything.
+                    let inventory = try await LibvirtClient(connection: Connection()).inventory([])
+                    if inventory.available {
+                        print("vms: " + (inventory.machines.isEmpty ? "nenhuma" : inventory.machines.map { "\($0.name) \($0.state.rawValue) ssh=\($0.sshReady.map(String.init) ?? "-") rdp=\($0.rdpReady.map(String.init) ?? "-")" }.joined(separator: " · ")))
+                    } else { print("vms: libvirt indisponível · \(inventory.error ?? "")") }
                     exit(0)
                 } catch { fputs("Falha: \(error.localizedDescription)\n", stderr); exit(1) }
             }
@@ -118,7 +123,7 @@ struct MainWindowObserver: NSViewRepresentable {
             guard let model, model.snapshot != nil, model.servicesData != nil, model.systemData != nil else {
                 throw TelemetryError.invalid("A coleta inicial falhou durante a verificação visual.")
             }
-            for (screen, name) in [(Screen.overview, "server"), (.gpu, "gpu"), (.ollama, "ollama"), (.services, "services"), (.terminal, "terminal")] {
+            for (screen, name) in [(Screen.overview, "server"), (.gpu, "gpu"), (.ollama, "ollama"), (.services, "services"), (.machines, "machines"), (.terminal, "terminal")] {
                 model.screen = screen
                 try await Task.sleep(for: .seconds(screen == .terminal ? 3 : 1))
                 guard let view = mainWindow?.contentView,

@@ -7,7 +7,7 @@ let package = Package(
     products: [.executable(name: "Homelab", targets: ["Homelab"])],
     dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0")],
     targets: [
-        .target(name: "HomelabCore", resources: [.copy("collector.py")]),
+        .target(name: "HomelabCore", resources: [.copy("collector.py"), .copy("vm.py")]),
         .executableTarget(name: "Homelab", dependencies: ["HomelabCore", .product(name: "SwiftTerm", package: "SwiftTerm")]),
         .testTarget(name: "HomelabCoreTests", dependencies: ["HomelabCore"])
     ]
