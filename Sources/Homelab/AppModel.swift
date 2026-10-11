@@ -2,12 +2,13 @@ import SwiftUI
 import HomelabCore
 
 enum Screen: String, CaseIterable, Identifiable {
-    case overview = "Servidor", gpu = "GPU", ollama = "Ollama", services = "Serviços", terminal = "Terminal"
+    case overview = "Servidor", gpu = "GPU", ollama = "Ollama", services = "Serviços", machines = "VMs", terminal = "Terminal"
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .overview: return "square.grid.2x2"; case .gpu: return "cpu"; case .terminal: return "terminal"
         case .ollama: return "sparkles"; case .services: return "square.stack.3d.up"
+        case .machines: return "desktopcomputer"
         }
     }
     var subtitle: String {
@@ -17,6 +18,7 @@ enum Screen: String, CaseIterable, Identifiable {
         case .terminal: return "Uma conexão direta com o seu homelab."
         case .ollama: return "Seu laboratório de inteligência artificial local."
         case .services: return "Estado dos serviços do seu servidor."
+        case .machines: return "Suas máquinas virtuais do libvirt, a um clique do desktop."
         }
     }
 }
@@ -43,6 +45,7 @@ struct Sample: Identifiable {
     @Published var selectedGPU: String?
     @Published var terminals: [TerminalSession] = [TerminalSession(name: "Sessão 1")]
     @Published var activeTerminal = UUID()
+    let machines: MachinesModel
     private var pollTasks: [Task<Void, Never>] = []
     private var generation = UUID()
     private var hasStarted = false
@@ -50,8 +53,13 @@ struct Sample: Identifiable {
     init() {
         let saved = UserDefaults.standard.data(forKey: "connection")
         let decoded = saved.flatMap { try? JSONDecoder().decode(Connection.self, from: $0) }
-        connection = decoded?.isValid == true ? decoded! : Connection()
+        let initial = decoded?.isValid == true ? decoded! : Connection()
+        connection = initial
+        machines = MachinesModel(connection: initial)
         activeTerminal = terminals[0].id
+        machines.openTerminal = { [weak self] name, arguments, destination in
+            self?.openTerminal(name: name, arguments: arguments, destination: destination)
+        }
     }
 
     var currentGPU: GPU? { snapshot?.gpus.first(where: { $0.id == selectedGPU }) ?? snapshot?.gpus.first }
@@ -76,6 +84,7 @@ struct Sample: Identifiable {
         guard !monitoring else { return }
         hasStarted = true
         monitoring = true
+        machines.start()
         let token = UUID(); generation = token
         pollTasks = CollectionGroup.allCases.map { group in
             Task { [weak self] in
@@ -92,12 +101,14 @@ struct Sample: Identifiable {
     }
     func pause() {
         monitoring = false; generation = UUID(); pollTasks.forEach { $0.cancel() }; pollTasks = []; refreshing = false
+        machines.pause()
     }
     func refresh() { pause(); start() }
-    func disconnect() { pause(); terminals.forEach { $0.stop() } }
+    /// Stops sessions and tunnels only; VMs keep running until the user shuts them down explicitly.
+    func disconnect() { pause(); terminals.forEach { $0.stop() }; machines.disconnect() }
     func save(_ config: Connection) {
         guard config.isValid else { return }
-        disconnect(); connection = config; snapshot = nil; servicesData = nil; systemData = nil
+        disconnect(); connection = config; machines.update(connection: config); snapshot = nil; servicesData = nil; systemData = nil
         samples = []; history = []; selectedGPU = nil; errors = [:]; reachable = false
         if let data = try? JSONEncoder().encode(config) { UserDefaults.standard.set(data, forKey: "connection") }
         start()
@@ -105,6 +116,10 @@ struct Sample: Identifiable {
     func addTerminal() {
         let session = TerminalSession(name: "Sessão \((terminals.map(\.number).max() ?? 0) + 1)")
         terminals.append(session); activeTerminal = session.id
+    }
+    func openTerminal(name: String, arguments: [String], destination: String) {
+        let session = TerminalSession(name: name, arguments: arguments, destination: destination)
+        terminals.append(session); activeTerminal = session.id; screen = .terminal
     }
     func closeTerminal(_ session: TerminalSession) {
         session.stop(); terminals.removeAll { $0.id == session.id }

@@ -15,6 +15,7 @@ Built with **SwiftUI, AppKit, Swift Charts, and SwiftTerm**. Interface in Brazil
 - **Ollama:** API availability, models loaded into memory, VRAM, size, parameters, and quantization.
 - **Services:** SSH, Docker, and Ollama. Counts of total containers, running containers, and containers with failing health checks.
 - **Terminal:** tabbed SSH sessions, colors, selection, copy/paste, resizing, and font size adjustment.
+- **Virtual machines:** libvirt VMs with state, vCPUs, RAM, disk, address, and guest readiness. Start, safe shutdown, restart, SSH into the guest, and a one-click **Open desktop** over an SSH tunnel.
 - **Menu bar:** a compact dashboard with metrics and controls, even when the main window is closed.
 - **History:** CPU, RAM, GPU, and VRAM charts covering the last five minutes, kept only in memory.
 
@@ -33,6 +34,7 @@ The `nvidia-smi` and `nvtop` commands supply data to native components; their ra
 - Linux with Python 3 and SSH access.
 - SSH key/agent authentication for automatic monitoring.
 - For the corresponding metrics: NVIDIA driver and `nvidia-smi`, `nvtop` with JSON `--snapshot` support, Docker, and Ollama.
+- For virtual machines (optional): libvirt/KVM, see [Virtual machines](#virtual-machines).
 
 Unavailable optional services are reported without blocking the rest of the dashboard.
 
@@ -89,11 +91,103 @@ Each group runs independent collections, with timeouts and no overlapping reques
 - **Close the window / `⌘W`:** keeps the app in the menu bar, preserving monitoring and SSH sessions. The Dock icon disappears while the window is closed.
 - **Pause:** stops data collection while preserving terminal sessions. Reopening the window keeps monitoring paused.
 - **Refresh / `⌘R`:** resumes collection and immediately queries all groups.
-- **Server → Disconnect all:** pauses monitoring and ends SSH sessions.
+- **Server → Disconnect all:** pauses monitoring, ends SSH sessions, and closes VM tunnels (VMs keep running).
 - **Power button / `⌘Q`:** quits the application and closes its connections.
-- **`⌘1` through `⌘5`:** switch between the main window's screens.
+- **`⌘1` through `⌘6`:** switch between the main window's screens.
 
 In the menu bar, the GPU, Ollama, and services cards open their detail screens. The footer provides refresh, pause, main dashboard, terminal, settings, and quit controls.
+
+## Virtual machines
+
+The **VMs** screen lists every libvirt domain on `qemu:///system`. Nothing is hardcoded to a specific VM; each one gets its own settings (menu **⋯ → Configurar…**). Discovery reuses the monitoring SSH connection: a small Python helper (`vm.py`, sent like the collector and never installed) runs `virsh` on the server. The list refreshes every 15 s while monitoring is active, with one SSH process per refresh. The menu bar shows a row per VM with its state and an **Open desktop** button.
+
+### Host requirements (Ubuntu server)
+
+- KVM/QEMU with libvirt, and `virsh` (`libvirt-clients`) and Python 3 on the server.
+- The SSH user must be in the `libvirt` group, so that `virsh -c qemu:///system list --all` works **without sudo**. The app never uses sudo on the host.
+- No graphical environment, agent, or extra service is needed on the host.
+- If libvirt is missing or inaccessible, the VMs screen says so and the rest of the dashboard keeps working.
+
+### Guest requirements
+
+- An SSH server reachable from the host, with public-key authentication for your Mac's key.
+- For the desktop: an RDP server, such as XRDP with Xorg (port 3389 by default).
+- A network address libvirt can report. On the `default` NAT network, the DHCP lease is used (an ARP fallback is tried next). For static IPs, set the address in the VM's settings.
+- Autostart can stay disabled: the app starts the VM only when asked.
+
+### VM settings
+
+| Setting | Default | Notes |
+|---|---|---|
+| Guest SSH user | empty | Empty uses your SSH default user. |
+| Guest address | automatic | DHCP lease/ARP from libvirt; set it only for static IPs. |
+| SSH port / RDP port | 22 / 3389 | Ports inside the guest. |
+| Local tunnel port | 3390, 3391, … | Each new VM gets the next port not used by another VM. |
+| Client | Windows App | Any installed app that opens `.rdp` files, or the system default. |
+
+Settings are stored in `UserDefaults`; no passwords are stored.
+
+### One-click desktop
+
+**Open desktop**:
+
+1. Reads the domain state from libvirt. A running VM is reused and never restarted.
+2. If the VM is shut off, starts it (`virsh start`).
+3. Waits for the guest: "running" in libvirt is not "ready". From the host, the app checks the guest's SSH banner and performs a real RDP handshake (X.224) on the RDP port, every 2 s, for up to 3 minutes. There are no fixed delays.
+4. Opens `ssh -N -L 127.0.0.1:<local>:<guest>:<rdp>` through the server, with `ExitOnForwardFailure`, keepalives, and no connection multiplexing.
+5. Repeats the RDP handshake **through the tunnel**.
+6. Writes `~/Library/Application Support/Homelab/RDP/<vm>.rdp` (address and username only, mode 600) and opens it with the configured client.
+
+Progress is shown on the VM card and can be cancelled. Repeated clicks join the flow already running, so they never create a second start or tunnel. Each failure (libvirt, guest not ready, XRDP down, port in use, tunnel or client error) is reported with its cause.
+
+**Windows App integration.** The Windows App (`com.microsoft.rdc.macos`) declares itself the owner of the `.rdp` document type. Opening a generated `.rdp` file starts the connection right away (verified with Windows App 11.4). It also registers the `rdp:` and `ms-rd:` URL schemes, but the app does not use them: the `.rdp` document is the documented and verifiable integration. Depending on its version, Windows App may also list the opened file among its connections, and it will ask for the guest password (it can store it in its own keychain). To use another client, choose it in the VM settings. Any app that opens `.rdp` files works without code changes.
+
+### Tunnels
+
+- They listen on `127.0.0.1` only; RDP is never exposed to the LAN or the internet.
+- Before connecting, the app checks that the local port is free. A port used by another program is reported as a conflict and that program is never terminated.
+- A tunnel stays open after the RDP window closes, so reopening is instant. It closes when you click ✕ next to it, change the VM settings, the VM shuts down, or Homelab quits. Monitoring settings changes and **Disconnect all** also close it.
+- After a crash, Homelab cleans up on the next launch. It stops a leftover tunnel only when that process is orphaned and runs exactly the command Homelab recorded. Other SSH processes are never touched.
+- A tunnel that drops (network, server reboot) shows as inactive; **Open desktop** opens a new one.
+
+### Shutdown and restart
+
+Closing the RDP client or Homelab **never** shuts down a VM. Shutdown is always explicit:
+
+1. **Guest first:** over SSH into the guest (jumping through the server with your Mac's keys), the app runs `systemctl --no-ask-password poweroff`, then `sudo -n systemctl poweroff`. It never prompts and never stores a password.
+2. **If the guest asks for a password** (the default on Kali), the card offers **Type password in terminal**. A tab of the app's terminal runs `sudo systemctl poweroff` in the guest. You type the password straight into `sudo`; it is not stored or logged. The app keeps watching libvirt until the VM is off.
+3. **If the guest's SSH does not answer,** an ACPI request (`virsh shutdown --mode acpi`) is sent. Some guests, such as desktops whose power-button action is "ask", ignore it.
+4. **Force shutdown** (`virsh destroy`) is available only from the ⋯ menu, or after a failed shutdown, with a confirmation. It is equivalent to pulling the plug.
+
+**Restart** is a safe shutdown followed by a start. If the password step is needed, the start resumes once the VM is off.
+
+To shut down without typing a password, you can optionally configure, **inside the guest only**, a scoped sudoers rule such as `youruser ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff`, or install `qemu-guest-agent` and add its channel to the domain. The app does neither for you, and never sets up global passwordless sudo.
+
+### Security
+
+- All SSH, both to the server and to the guest via `ProxyJump`, uses `/usr/bin/ssh` with your keys, agent, and normal host-key verification. Guest commands run in `BatchMode`.
+- VM names are validated against a conservative pattern before reaching any command. Remote arguments are shell-quoted, and the helper calls `virsh` with argument lists (`--domain <name>`), never a shell.
+- Guest addresses, from configuration or libvirt, are validated before they are used in `ssh` arguments.
+- The `.rdp` file contains no credentials.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| "Libvirt indisponível" | `ssh homelab virsh -c qemu:///system list --all` must work without sudo (group `libvirt`, then log in again). |
+| VM running, "Aguardando convidado" | The guest is booting, or its SSH/RDP services are not answering; check the guest's network and services. |
+| "Sem endereço de rede" | No DHCP lease: set the guest address manually in the VM settings. |
+| Stuck on "Desligando" | Some guests take minutes to stop (systemd stop jobs). SSH and RDP stop first, so the app keeps watching libvirt until the VM is off. Use **Force shutdown** only if it never finishes. |
+| SSH ready, desktop not | `systemctl status xrdp` in the guest; the RDP port in the settings must match. |
+| "Porta local … em uso" | Another process (often a manual `ssh -L`) holds the port: close it or choose another local port. |
+| Guest SSH fails / host key | Open **Terminal SSH** once to accept the guest's host key, and check that your key is authorized in the guest. |
+| Client does not open | Install Windows App or choose another `.rdp` client in the VM settings. |
+
+### Known limitations
+
+- Without a guest agent, readiness is inferred from the guest's SSH and RDP ports.
+- Only `qemu:///system` is supported. Paused/suspended domains are shown but not resumed by the app.
+- The app does not render RDP itself; it relies on the installed client.
 
 ## Where does the data come from?
 
@@ -133,9 +227,9 @@ swift test --build-system native
 python3 -m unittest discover -s Tests -p 'test_*.py' -v
 ```
 
-These cover parsing, missing data, response framing, connection validation, quoting, timeouts/cancellation, CSV, Docker counters, and collection group isolation.
+These cover parsing, missing data, response framing, connection validation, quoting, timeouts/cancellation, CSV, Docker counters, and collection group isolation. The VM tests cover state parsing and discovery, command construction and quoting, start/shutdown/restart flows, guest readiness, RDP handshakes over real sockets, tunnel lifecycle (conflicts, early exit, timeout, cancellation, orphan cleanup), duplicate requests, and timeouts.
 
-After configuring the `homelab` SSH alias, validate all three groups against the server:
+After configuring the `homelab` SSH alias, validate all three groups against the server (it also lists VMs, read-only):
 
 ```sh
 dist/Homelab.app/Contents/MacOS/Homelab --smoke-test
@@ -155,6 +249,7 @@ This routine captures only the app's own screens, opens an SSH session, and chec
 
 - The repository's default configuration contains no IP address, SSH username, or credentials for a specific server.
 - Connection preferences are stored in macOS `UserDefaults`, outside the project. Metric history stays in memory.
+- VM settings live in `UserDefaults`; the generated `.rdp` files and the tunnel PID records live in `~/Library/Application Support/Homelab/`, and none of them contains credentials.
 - The collector accesses the Ollama API through the server's loopback interface; it does not need to be exposed on the network.
 - `.gitignore` excludes builds, generated applications, caches, environment files, common key formats, captures, and local logs.
 - Do not add SSH keys, passwords, tokens, configuration exports, dumps, captures, or terminal recordings without reviewing their contents. `.gitignore` does not detect secrets embedded in code or protect files added by force.
@@ -163,7 +258,7 @@ This routine captures only the app's own screens, opens an SSH session, and chec
 
 ```text
 Sources/Homelab/          Interface, menu bar, SSH sessions, and scheduling
-Sources/HomelabCore/      Connection, models, process execution, and Python collector
+Sources/HomelabCore/      Connection, models, process execution, Python collector, libvirt helper, tunnels, and VM flows
 Tests/                   Swift and Python tests
 Resources/               Application metadata
 scripts/                 Build, packaging, and icon generation

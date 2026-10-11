@@ -7,6 +7,9 @@ import HomelabCore
     let id = UUID()
     let name: String
     let command: String?
+    /// Full ssh arguments for sessions that do not target the homelab itself (e.g. a VM guest).
+    let arguments: [String]?
+    let destination: String?
     var number: Int { Int(name.split(separator: " ").last ?? "1") ?? 1 }
     @Published private(set) var running = false
     @Published private(set) var started = false
@@ -14,8 +17,8 @@ import HomelabCore
     @Published private(set) var view: LocalProcessTerminalView
     @Published var fontSize: CGFloat = 13 { didSet { view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular) } }
 
-    init(name: String, command: String? = nil) {
-        self.name = name; self.command = command
+    init(name: String, command: String? = nil, arguments: [String]? = nil, destination: String? = nil) {
+        self.name = name; self.command = command; self.arguments = arguments; self.destination = destination
         view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
         super.init(); configure(view)
     }
@@ -37,7 +40,7 @@ import HomelabCore
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         environment["LANG"] = environment["LANG"] ?? "en_US.UTF-8"
-        view.startProcess(executable: "/usr/bin/ssh", args: connection.arguments(interactive: true, command: command),
+        view.startProcess(executable: "/usr/bin/ssh", args: arguments ?? connection.arguments(interactive: true, command: command),
                           environment: environment.map { "\($0.key)=\($0.value)" })
     }
     func stop() {
@@ -98,7 +101,7 @@ struct TerminalPane: View {
             Rectangle().fill(Theme.line).frame(height: 1)
             TerminalHost(terminal: session.view).padding(12).background(Color(red: 0.035, green: 0.048, blue: 0.065))
             HStack {
-                Text(connection.destination).font(.system(size: 11, design: .monospaced))
+                Text(session.destination ?? connection.destination).font(.system(size: 11, design: .monospaced))
                 Spacer()
                 Text(session.command == nil ? "⌘C copiar  ·  ⌘V colar  ·  Ctrl+C interromper" : "q sair  ·  F2 opções  ·  setas navegar")
                     .font(.system(size: 11))

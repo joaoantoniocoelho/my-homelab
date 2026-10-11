@@ -21,6 +21,7 @@ struct ContentView: View {
                             case .gpu: GPUPage()
                             case .ollama: OllamaPage()
                             case .services: ServicesPage()
+                            case .machines: MachinesPage(machines: model.machines)
                             case .terminal: EmptyView()
                             }
                         }.padding(28).frame(maxWidth: 1500)

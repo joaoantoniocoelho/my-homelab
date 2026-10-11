@@ -28,6 +28,7 @@ struct HomelabMenu: View {
                         .background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
                 }
                 statusStrip
+                MenuMachines(machines: model.machines) { show(.machines) }
             }.padding(.horizontal, 14).padding(.vertical, 12)
             Divider().overlay(Theme.line)
             footer
@@ -195,6 +196,38 @@ struct HomelabMenu: View {
         NSApp.setActivationPolicy(.regular)
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// One row per VM: state at a glance and the one-click desktop. Hidden when there are no VMs.
+private struct MenuMachines: View {
+    @ObservedObject var machines: MachinesModel
+    let showPage: () -> Void
+    var body: some View {
+        if !machines.machines.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(machines.machines) { machine in
+                    let operation = machines.running[machine.name]
+                    let stopping = machines.stopping.contains(machine.name)
+                    let status = MachineStatus(machine, operation: operation, stopping: stopping)
+                    HStack(spacing: 8) {
+                        Button(action: showPage) { Label(machine.name, systemImage: "desktopcomputer").font(.system(size: 11)) }
+                            .buttonStyle(.plain).help("Ver no painel")
+                        Spacer()
+                        if let stage = machines.stages[machine.name] {
+                            ProgressView().controlSize(.mini).help(stage.title)
+                        } else if machines.failures[machine.name] != nil {
+                            Button(action: showPage) { Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange) }
+                                .buttonStyle(.plain).help(machines.failures[machine.name]?.message ?? "")
+                        }
+                        StatusBadge(title: status.title, color: status.color)
+                        Button { machines.perform(.openDesktop, on: machine.name) } label: { Image(systemName: "rectangle.on.rectangle") }
+                            .buttonStyle(.borderless).help("Abrir desktop")
+                            .disabled(operation != nil || machine.state == .shutdown || stopping || !VirtualMachineConfig.isSafeName(machine.name))
+                    }
+                }
+            }.padding(10).background(Theme.card, in: RoundedRectangle(cornerRadius: 11))
+        }
     }
 }
 
