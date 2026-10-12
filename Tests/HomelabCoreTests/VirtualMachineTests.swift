@@ -50,6 +50,15 @@ final class VirtualMachineModelTests: XCTestCase {
 
         let decoded = try JSONDecoder().decode(VirtualMachineConfig.self, from: Data(#"{"name":"kali","guestUser":"joaoac"}"#.utf8))
         XCTAssertEqual(decoded, VirtualMachineConfig(name: "kali", guestUser: "joaoac"))
+        XCTAssertEqual(decoded.display, .fullHD)
+    }
+
+    func testDisplayRoundTripsAndToleratesUnknownValues() throws {
+        let saved = VirtualMachineConfig(name: "kali", display: .fullScreen)
+        XCTAssertEqual(try JSONDecoder().decode(VirtualMachineConfig.self, from: try JSONEncoder().encode(saved)), saved)
+        let unknown = try JSONDecoder().decode(VirtualMachineConfig.self, from: Data(#"{"name":"kali","localPort":3395,"display":"8k"}"#.utf8))
+        XCTAssertEqual(unknown.display, .fullHD)
+        XCTAssertEqual(unknown.localPort, 3395)
     }
 
     func testEndpointPrefersValidatedOverride() {
@@ -96,6 +105,28 @@ final class VirtualMachineModelTests: XCTestCase {
         let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
         XCTAssertEqual(permissions?.intValue, 0o600)
         XCTAssertThrowsError(try RDPFile.write(name: "../evil", port: 1, username: "", in: directory))
+    }
+
+    func testRDPFileUsesFixedWindowByDefault() throws {
+        let lines = RDPFile.contents(host: "127.0.0.1", port: 3390, username: "").components(separatedBy: "\r\n")
+        for line in ["screen mode id:i:1", "desktopwidth:i:1920", "desktopheight:i:1080", "dynamic resolution:i:0",
+                     "smart sizing:i:1", "session bpp:i:32"] {
+            XCTAssertTrue(lines.contains(line), line)
+        }
+        XCTAssertFalse(lines.contains { $0.hasPrefix("username:") })
+
+        let small = RDPFile.contents(host: "127.0.0.1", port: 3390, username: "", display: .hd).components(separatedBy: "\r\n")
+        XCTAssertTrue(small.contains("desktopwidth:i:1280") && small.contains("desktopheight:i:720"))
+
+        let full = RDPFile.contents(host: "127.0.0.1", port: 3390, username: "", display: .fullScreen).components(separatedBy: "\r\n")
+        XCTAssertTrue(full.contains("screen mode id:i:2"))
+        XCTAssertTrue(full.contains("dynamic resolution:i:1"))
+        XCTAssertFalse(full.contains { $0.hasPrefix("desktopwidth:") })
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = try RDPFile.write(name: "kali", port: 3390, username: "", display: .qhd, in: directory)
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("desktopwidth:i:2560"))
     }
 
     func testGuestPowerOffClassification() {
