@@ -222,8 +222,11 @@ struct MachineSettings: View {
                         }
                         Text("Padrão do sistema").tag("")
                     }
+                    Picker("Resolução", selection: $config.display) {
+                        ForEach(RDPDisplay.allCases) { Text($0.title).tag($0) }
+                    }
                 }
-            }.formStyle(.grouped).frame(height: 330)
+            }.formStyle(.grouped).frame(height: 370)
             if let error = config.validationError {
                 Label(error.prefix(1).uppercased() + error.dropFirst(), systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
             }

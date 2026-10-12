@@ -88,6 +88,26 @@ public enum VMError: LocalizedError, Equatable {
     }
 }
 
+/// Remote session size. A fixed size keeps the guest encoding a known number of pixels, whatever the Mac's screen.
+public enum RDPDisplay: String, Codable, CaseIterable, Sendable, Identifiable {
+    case hd = "1280x720", hdPlus = "1600x900", fullHD = "1920x1080", qhd = "2560x1440", fullScreen
+
+    public var id: String { rawValue }
+    public var size: (width: Int, height: Int)? {
+        switch self {
+        case .hd: return (1280, 720)
+        case .hdPlus: return (1600, 900)
+        case .fullHD: return (1920, 1080)
+        case .qhd: return (2560, 1440)
+        case .fullScreen: return nil
+        }
+    }
+    public var title: String {
+        guard let size else { return "Tela cheia" }
+        return "\(size.width) × \(size.height)"
+    }
+}
+
 /// Per-VM settings. The libvirt domain name is the identity; the address is discovered unless overridden.
 public struct VirtualMachineConfig: Codable, Equatable, Sendable, Identifiable {
     public static let windowsApp = "com.microsoft.rdc.macos"
@@ -102,14 +122,16 @@ public struct VirtualMachineConfig: Codable, Equatable, Sendable, Identifiable {
     public var localPort: Int
     /// Bundle identifier of the app that opens `.rdp` files; empty uses the system default handler.
     public var rdpClient: String
+    public var display: RDPDisplay
 
     public init(name: String, guestUser: String = "", guestAddress: String = "", sshPort: Int = 22,
-                rdpPort: Int = 3389, localPort: Int = VirtualMachineConfig.firstLocalPort, rdpClient: String = VirtualMachineConfig.windowsApp) {
+                rdpPort: Int = 3389, localPort: Int = VirtualMachineConfig.firstLocalPort, rdpClient: String = VirtualMachineConfig.windowsApp,
+                display: RDPDisplay = .fullHD) {
         self.name = name; self.guestUser = guestUser; self.guestAddress = guestAddress; self.sshPort = sshPort
-        self.rdpPort = rdpPort; self.localPort = localPort; self.rdpClient = rdpClient
+        self.rdpPort = rdpPort; self.localPort = localPort; self.rdpClient = rdpClient; self.display = display
     }
 
-    enum CodingKeys: String, CodingKey { case name, guestUser, guestAddress, sshPort, rdpPort, localPort, rdpClient }
+    enum CodingKeys: String, CodingKey { case name, guestUser, guestAddress, sshPort, rdpPort, localPort, rdpClient, display }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = VirtualMachineConfig(name: try c.decode(String.self, forKey: .name))
@@ -120,6 +142,8 @@ public struct VirtualMachineConfig: Codable, Equatable, Sendable, Identifiable {
         rdpPort = try c.decodeIfPresent(Int.self, forKey: .rdpPort) ?? defaults.rdpPort
         localPort = try c.decodeIfPresent(Int.self, forKey: .localPort) ?? defaults.localPort
         rdpClient = try c.decodeIfPresent(String.self, forKey: .rdpClient) ?? defaults.rdpClient
+        // An unknown size (e.g. saved by a newer build) falls back to the default instead of dropping the whole config.
+        display = (try? c.decodeIfPresent(RDPDisplay.self, forKey: .display)) ?? defaults.display
     }
 
     /// New VMs get the first local port not claimed by another saved VM, so tunnels never collide by default.
@@ -301,18 +325,29 @@ public struct GuestClient: Sendable {
 }
 
 /// `.rdp` file handed to the desktop client. Never contains credentials.
+/// Clients treat an opened file as its own connection, so display settings must be spelled out here:
+/// saved bookmark preferences do not apply to it.
 public enum RDPFile {
-    public static func contents(host: String, port: Int, username: String) -> String {
+    public static func contents(host: String, port: Int, username: String, display: RDPDisplay = .fullHD) -> String {
         var lines = ["full address:s:\(host):\(port)"]
         if !username.isEmpty { lines.append("username:s:\(username)") }
+        // 32 bpp is required for the graphics pipeline (H.264/RFX) that xrdp prefers.
+        lines += ["session bpp:i:32", "use multimon:i:0"]
+        if let size = display.size {
+            // Fixed remote size; a smaller window scales the image instead of resizing the session.
+            lines += ["screen mode id:i:1", "desktopwidth:i:\(size.width)", "desktopheight:i:\(size.height)",
+                      "dynamic resolution:i:0", "smart sizing:i:1"]
+        } else {
+            lines += ["screen mode id:i:2", "dynamic resolution:i:1"]
+        }
         return lines.joined(separator: "\r\n") + "\r\n"
     }
 
-    public static func write(name: String, port: Int, username: String, in directory: URL) throws -> URL {
+    public static func write(name: String, port: Int, username: String, display: RDPDisplay = .fullHD, in directory: URL) throws -> URL {
         guard VirtualMachineConfig.isSafeName(name) else { throw VMError.invalidConfiguration("nome de VM não suportado.") }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let url = directory.appendingPathComponent(name + ".rdp")
-        try Data(contents(host: "127.0.0.1", port: port, username: username).utf8).write(to: url, options: .atomic)
+        try Data(contents(host: "127.0.0.1", port: port, username: username, display: display).utf8).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         return url
     }

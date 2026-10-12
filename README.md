@@ -135,6 +135,7 @@ The **VMs** screen lists every libvirt domain on `qemu:///system`. Nothing is ha
 | SSH port / RDP port | 22 / 3389 | Ports inside the guest. |
 | Local tunnel port | 3390, 3391, … | Each new VM gets the next port not used by another VM. |
 | Client | Windows App | Any installed app that opens `.rdp` files, or the system default. |
+| Resolution | 1920 × 1080 | Window with a fixed remote size (1280 × 720 up to 2560 × 1440), or full screen. |
 
 Settings are stored in `UserDefaults`; no passwords are stored.
 
@@ -147,7 +148,9 @@ Settings are stored in `UserDefaults`; no passwords are stored.
 3. Waits for the guest: "running" in libvirt is not "ready". From the host, the app checks the guest's SSH banner and performs a real RDP handshake (X.224) on the RDP port, every 2 s, for up to 3 minutes. There are no fixed delays.
 4. Opens `ssh -N -L 127.0.0.1:<local>:<guest>:<rdp>` through the server, with `ExitOnForwardFailure`, keepalives, and no connection multiplexing.
 5. Repeats the RDP handshake **through the tunnel**.
-6. Writes `~/Library/Application Support/Homelab/RDP/<vm>.rdp` (address and username only, mode 600) and opens it with the configured client.
+6. Writes `~/Library/Application Support/Homelab/RDP/<vm>.rdp` (address, username, and display settings, no credentials, mode 600) and opens it with the configured client.
+
+The client treats the generated file as its own connection, so the resolution comes from the VM's settings, not from a bookmark saved in the client. A fixed size keeps the remote session from following a large or ultrawide display: every pixel is encoded in software by the guest, so a smaller session is noticeably faster. A smaller window scales the image instead of resizing the session.
 
 Progress is shown on the VM card and can be cancelled. Repeated clicks join the flow already running, so they never create a second start or tunnel. Each failure (libvirt, guest not ready, XRDP down, port in use, tunnel or client error) is reported with its cause.
 

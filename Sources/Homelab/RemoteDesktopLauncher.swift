@@ -31,7 +31,7 @@ enum RemoteDesktopLauncher {
     }
 
     @MainActor static func launch(_ config: VirtualMachineConfig) async throws {
-        let file = try RDPFile.write(name: config.name, port: config.localPort, username: config.guestUser, in: directory)
+        let file = try RDPFile.write(name: config.name, port: config.localPort, username: config.guestUser, display: config.display, in: directory)
         if config.rdpClient.isEmpty {
             guard NSWorkspace.shared.open(file) else { throw VMError.clientUnavailable("nenhum app abre arquivos .rdp") }
             return
