@@ -23,11 +23,14 @@ struct VMFailure: Equatable {
     /// (stop jobs) with SSH/RDP already down; that is "shutting down", not "waiting for the guest".
     @Published private(set) var stopping: Set<String> = []
     @Published var failures: [String: VMFailure] = [:]
+    /// True while the app's SSH stream delivers the inventory; otherwise changes fall back to a one-shot query.
+    var streaming = false
+    /// Fired when VM settings change, so the stream's probes can be refreshed.
+    var onConfigsChanged: () -> Void = { }
     /// Opens an SSH tab in the app's terminal: (tab name, ssh arguments, destination label).
     var openTerminal: (String, [String], String) -> Void = { _, _, _ in }
 
     private var connection: Connection
-    private var pollTask: Task<Void, Never>?
     private lazy var tunnelManager = TunnelManager(records: Self.records) { [weak self] in
         Task { @MainActor in self?.syncTunnels() }
     }
@@ -53,20 +56,13 @@ struct VMFailure: Equatable {
     func machine(named name: String) -> VirtualMachine? { machines.first { $0.name == name } }
     var busy: Bool { !running.isEmpty }
 
-    func start() {
-        guard pollTask == nil else { return }
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.refresh()
-                do { try await Task.sleep(for: .seconds(Self.pollInterval)) } catch { return }
-            }
-        }
+    /// stdin line for the remote collector: per-VM address/port overrides used by its readiness probes.
+    var probesMessage: Data {
+        Data(("{\"probes\":" + LibvirtClient.probes(Array(configs.values)) + "}\n").utf8)
     }
-    func pause() { pollTask?.cancel(); pollTask = nil }
 
     /// Monitoring settings changed or the app is quitting: never leave tunnels to the old destination.
     func disconnect() {
-        pause()
         tunnelManager.stopAll()
         syncTunnels()
     }
@@ -83,17 +79,26 @@ struct VMFailure: Equatable {
         do {
             let inventory = try await LibvirtClient(connection: current).inventory(Array(configs.values))
             guard current == connection, !Task.isCancelled else { return }
-            loaded = true; lastUpdate = Date()
-            libvirtError = inventory.available ? nil : (inventory.error ?? "O libvirt não respondeu.")
-            guard inventory.available else { machines = []; return }
-            machines = inventory.machines.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            stopping = stopping.filter { name in machines.contains { $0.name == name && !$0.isOff } }
-            adoptNewMachines()
-            for machine in machines where machine.isOff && tunnels[machine.name] != nil { tunnelManager.stop(machine.name) }
+            receive(inventory)
         } catch is CancellationError { } catch {
             guard current == connection else { return }
-            loaded = true; libvirtError = error.localizedDescription
+            receive(failure: error.localizedDescription)
         }
+    }
+
+    /// An inventory sample from the stream (or a one-shot query).
+    func receive(_ inventory: VMInventory) {
+        loaded = true; lastUpdate = Date()
+        libvirtError = inventory.available ? nil : (inventory.error ?? "O libvirt não respondeu.")
+        guard inventory.available else { machines = []; return }
+        machines = inventory.machines.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        stopping = stopping.filter { name in machines.contains { $0.name == name && !$0.isOff } }
+        adoptNewMachines()
+        for machine in machines where machine.isOff && tunnels[machine.name] != nil { tunnelManager.stop(machine.name) }
+    }
+
+    func receive(failure message: String) {
+        loaded = true; libvirtError = message
     }
 
     func save(_ config: VirtualMachineConfig) {
@@ -101,7 +106,7 @@ struct VMFailure: Equatable {
         if configs[config.name] != config { tunnelManager.stop(config.name) }
         configs[config.name] = config
         persist()
-        Task { await refresh() }
+        if !streaming { Task { await refresh() } }
     }
 
     /// Returns whether the operation succeeded. The UI disables actions while one runs; the core also
@@ -197,6 +202,7 @@ struct VMFailure: Equatable {
     private func persist() {
         let list = configs.values.sorted { $0.name < $1.name }
         if let data = try? JSONEncoder().encode(list) { UserDefaults.standard.set(data, forKey: "virtualMachines") }
+        onConfigsChanged()
     }
 
     private func syncTunnels() {

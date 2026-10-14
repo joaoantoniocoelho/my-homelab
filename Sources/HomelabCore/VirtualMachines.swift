@@ -229,7 +229,7 @@ public struct LibvirtClient: Sendable {
         return (["python3", "-c", Connection.shellQuote(script), Connection.shellQuote(uri)] + arguments.map(Connection.shellQuote)).joined(separator: " ")
     }
 
-    static func probes(_ configs: [VirtualMachineConfig]) -> String {
+    public static func probes(_ configs: [VirtualMachineConfig]) -> String {
         struct Probe: Encodable { let address: String; let ssh: Int; let rdp: Int }
         var probes: [String: Probe] = [:]
         for config in configs where config.isValid {

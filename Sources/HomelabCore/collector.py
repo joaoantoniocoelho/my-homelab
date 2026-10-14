@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -182,7 +183,107 @@ def collect(group):
     return data
 
 
+# Default cadence (seconds) of the persistent `stream` mode; the app overrides them with name=seconds arguments.
+STREAM_INTERVALS = dict(fast=3.0, services=8.0, system=60.0, vms=15.0)
+
+
+class Stream:
+    """Runs every group on its own schedule and writes one JSON line per sample.
+
+    It ends when stdin reaches EOF (the SSH channel closed) or stdout is gone, so a dropped
+    connection never leaves an orphaned collector on the server.
+    """
+
+    def __init__(self, intervals, out, stdin, vm_source=None, vm_uri=None, sampler=collect):
+        self.intervals = intervals
+        self.out, self.stdin, self.sampler = out, stdin, sampler
+        self.vm_source, self.vm_uri = vm_source, vm_uri
+        # None until the app sends its VM probes: the first VM sample must already use them.
+        self.probes = None
+        self.vm_module = None
+        self.stop = threading.Event()
+        self.write_lock = threading.Lock()
+        self.wake = {group: threading.Event() for group in intervals}
+
+    def emit(self, group, **fields):
+        line = json.dumps(dict(group=group, ts=time.time(), **fields), allow_nan=False)
+        with self.write_lock:
+            try:
+                self.out.write(line + "\n")
+                self.out.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                self.stop.set()
+
+    def sample(self, group):
+        if group != "vms":
+            return self.sampler(group)
+        if self.vm_module is None:
+            self.vm_module = {"__name__": "hl_vm"}
+            exec(compile(self.vm_source, "vm.py", "exec"), self.vm_module)
+        return self.vm_module["main"]([self.vm_uri, "inventory", json.dumps(self.probes)])
+
+    def work(self, group):
+        interval = self.intervals[group]
+        while not self.stop.is_set():
+            if group == "vms" and self.probes is None:
+                self.wake[group].wait()
+                self.wake[group].clear()
+                continue
+            began = time.monotonic()
+            try:
+                self.emit(group, data=self.sample(group))
+            except Exception as error:  # a failed sample must never end the stream
+                self.emit(group, error=str(error) or error.__class__.__name__)
+            remaining = max(0.05, interval - (time.monotonic() - began))
+            # A wake-up (new probes) triggers an immediate sample; stop is checked by the loop.
+            self.wake[group].wait(remaining)
+            self.wake[group].clear()
+
+    def read_stdin(self):
+        try:
+            for line in self.stdin:
+                try:
+                    command = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(command, dict) and isinstance(command.get("probes"), dict):
+                    self.probes = command["probes"]
+                    if "vms" in self.wake:
+                        self.wake["vms"].set()
+        except (OSError, ValueError):
+            pass
+        self.stop.set()
+
+    def run(self):
+        threading.Thread(target=self.read_stdin, daemon=True).start()
+        for group in self.intervals:
+            threading.Thread(target=self.work, args=(group,), daemon=True).start()
+        self.stop.wait()
+        for event in self.wake.values():
+            event.set()
+
+
+def parse_stream_arguments(args):
+    intervals, options = dict(STREAM_INTERVALS), {}
+    for arg in args:
+        name, _, value = arg.partition("=")
+        if name in intervals:
+            number_value = number(value)
+            if number_value and number_value >= 0.5:
+                intervals[name] = float(number_value)
+        elif name in ("vm-script", "vm-uri"):
+            options[name] = value
+    if "vm-script" not in options or "vm-uri" not in options:
+        del intervals["vms"]
+    return intervals, options
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "stream":
+        intervals, options = parse_stream_arguments(sys.argv[2:])
+        Stream(intervals, sys.stdout, sys.stdin, options.get("vm-script"), options.get("vm-uri")).run()
+        # Skip interpreter shutdown: a flush on a closed pipe would raise, and workers are daemons.
+        os._exit(0)
     print("__HL_JSON_BEGIN__")
     print(json.dumps(collect(sys.argv[1]), allow_nan=False))
     print("__HL_JSON_END__")

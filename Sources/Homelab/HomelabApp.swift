@@ -53,10 +53,6 @@ struct HomelabApp: App {
                 }
             }
         }
-        MenuBarExtra("Homelab", systemImage: "server.rack") {
-            HomelabMenu(model: model)
-        }
-        .menuBarExtraStyle(.window)
     }
 }
 
@@ -81,32 +77,61 @@ struct MainWindowObserver: NSViewRepresentable {
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     private weak var mainWindow: NSWindow?
-    private var closeObserver: NSObjectProtocol?
+    private var windowObservers: [NSObjectProtocol] = []
+    private var statusItem: NSStatusItem?
 
     func observe(_ window: NSWindow) {
         guard mainWindow !== window else { return }
-        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
         mainWindow = window
         window.isReleasedWhenClosed = false
-        closeObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
-            Task { @MainActor in
-                NSApp.setActivationPolicy(.accessory)
-            }
-        }
+        let center = NotificationCenter.default
+        windowObservers = [
+            center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    NSApp.setActivationPolicy(.accessory)
+                    self?.model?.setWindowVisible(false)
+                }
+            },
+            // Minimized, on another Space or fully covered also count as hidden: nobody is looking at the data.
+            center.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.model?.setWindowVisible(window.occlusionState.contains(.visible)) }
+            },
+        ]
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        installStatusItem()
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.model?.setAwake(false) }
+        }
+        workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.model?.setAwake(true) }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--capture-ui"), CommandLine.arguments.count > index + 1 {
             let directory = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
             Task { await captureUI(in: directory) }
         }
     }
+
+    /// The only menu bar presence: a click brings the main window back.
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "Homelab")
+        item.button?.target = self
+        item.button?.action = #selector(showMainWindow)
+        statusItem = item
+    }
+    @objc private func showMainWindow() { _ = applicationShouldHandleReopen(NSApp, hasVisibleWindows: false) }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         sender.setActivationPolicy(.regular)
         mainWindow?.makeKeyAndOrderFront(nil)
+        model?.setWindowVisible(true)
         sender.activate(ignoringOtherApps: true)
         return true
     }
@@ -135,17 +160,20 @@ struct MainWindowObserver: NSViewRepresentable {
             }
             guard let window = mainWindow else { throw TelemetryError.invalid("Janela principal não encontrada.") }
             let session = model.currentTerminal
-            let lastSample = model.snapshot?.timestamp
+            model.hideGrace = 0.5
             window.performClose(nil)
+            try await Task.sleep(for: .seconds(1))
+            let lastSample = model.snapshot?.timestamp
             try await Task.sleep(for: .seconds(model.connection.interval + 2))
             guard !window.isVisible, NSApp.activationPolicy() == .accessory,
-                  model.monitoring, session.running, model.snapshot?.timestamp != lastSample else {
-                throw TelemetryError.invalid("A janela fechada não preservou o monitoramento e o terminal.")
+                  model.monitoring, session.running, model.snapshot?.timestamp == lastSample else {
+                throw TelemetryError.invalid("A janela fechada não pausou a coleta preservando o terminal.")
             }
             _ = applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
-            try await Task.sleep(for: .milliseconds(500))
-            guard window.isVisible, NSApp.activationPolicy() == .regular, model.currentTerminal === session else {
-                throw TelemetryError.invalid("Falha ao reabrir o painel preservando a sessão.")
+            try await Task.sleep(for: .seconds(model.connection.interval + 8))
+            guard window.isVisible, NSApp.activationPolicy() == .regular, model.currentTerminal === session,
+                  model.snapshot?.timestamp != lastSample else {
+                throw TelemetryError.invalid("Reabrir o painel não retomou a coleta preservando a sessão.")
             }
             model.pause()
             window.performClose(nil)
@@ -154,24 +182,7 @@ struct MainWindowObserver: NSViewRepresentable {
             try await Task.sleep(for: .milliseconds(500))
             guard !model.monitoring else { throw TelemetryError.invalid("Reabrir a janela retomou uma coleta pausada.") }
             model.start()
-            let menuWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 650), styleMask: [.borderless], backing: .buffered, defer: false)
-            menuWindow.isReleasedWhenClosed = false
-            let menuView = NSHostingView(rootView: HomelabMenu(model: model))
-            menuWindow.contentView = menuView
-            let menuSize = menuView.fittingSize
-            guard menuSize.width >= 380, menuSize.height >= 500 else {
-                throw TelemetryError.invalid("O painel da barra de menus colapsou ao calcular sua altura: \(menuSize).")
-            }
-            menuWindow.setContentSize(menuSize)
-            menuWindow.center()
-            menuWindow.orderFront(nil)
-            try await Task.sleep(for: .milliseconds(500))
-            if let bitmap = menuView.bitmapImageRepForCachingDisplay(in: menuView.bounds) {
-                menuView.cacheDisplay(in: menuView.bounds, to: bitmap)
-                try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("menubar.png"))
-            }
-            menuWindow.close()
-            try "Telas renderizadas. Fechar/reabrir preserva monitoramento, pausa e sessão SSH.\n".write(to: directory.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
+            try "Telas renderizadas. Fechar pausa e reabrir retoma a coleta; pausa manual e sessão SSH preservadas.\n".write(to: directory.appendingPathComponent("result.txt"), atomically: true, encoding: .utf8)
             model.screen = .overview
         } catch {
             try? error.localizedDescription.write(to: directory.appendingPathComponent("error.txt"), atomically: true, encoding: .utf8)

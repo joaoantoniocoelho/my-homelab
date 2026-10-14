@@ -1,6 +1,6 @@
 # my-homelab
 
-A native dashboard for monitoring your Linux server from macOS. View system resources, NVIDIA GPU metrics, Ollama models, and services, manage libvirt virtual machines and open their desktops in one click, or open an SSH session, from the main window or directly from the menu bar.
+A native dashboard for monitoring your Linux server from macOS. View system resources, NVIDIA GPU metrics, Ollama models, and services, manage libvirt virtual machines and open their desktops in one click, or open an SSH session.
 
 Built with **SwiftUI, AppKit, Swift Charts, and SwiftTerm**. Interface in Brazilian Portuguese. No web interface and no agent to install on the server.
 
@@ -16,7 +16,7 @@ Built with **SwiftUI, AppKit, Swift Charts, and SwiftTerm**. Interface in Brazil
 - **Services:** SSH, Docker, and Ollama. Counts of total containers, running containers, and containers with failing health checks.
 - **Terminal:** tabbed SSH sessions, colors, selection, copy/paste, resizing, and font size adjustment.
 - **Virtual machines:** libvirt VMs with state, vCPUs, RAM, disk, address, and guest readiness. Start, safe shutdown, restart, SSH into the guest, and a one-click **Open desktop** over an SSH tunnel.
-- **Menu bar:** a compact dashboard with metrics and controls, even when the main window is closed.
+- **Menu bar icon:** a single icon that brings the main window back after it was closed.
 - **History:** CPU, RAM, GPU, and VRAM charts covering the last five minutes, kept only in memory.
 
 The `nvidia-smi` and `nvtop` commands supply data to native components; their raw output is not displayed in the monitor.
@@ -92,25 +92,26 @@ Telemetry uses `BatchMode=yes`. If you need to confirm the server's host key or 
 | Docker, Ollama, and loaded models | 8 s | 5–10 s |
 | Disk and uptime | 45 s | 30–60 s |
 
-Each group runs independent collections, with timeouts and no overlapping requests within the same group. The interval is measured between start times; a slow collection may delay the next one. The menu bar dashboard shares the main window's data without additional queries.
+The app keeps **one** persistent SSH connection and runs the collector in `stream` mode (`python3 -u`, sent through the connection and never installed). The collector schedules each group on its own cadence, using the intervals above, and writes one JSON line per sample; a failed sample becomes an error line and never ends the stream. VM inventory (every 15 s) travels on the same connection.
 
-- **Close the window / `⌘W`:** keeps the app in the menu bar, preserving monitoring and SSH sessions. The Dock icon disappears while the window is closed.
+- If no `fast` sample arrives for `max(10 s, 3 × interval)`, the data is marked as stale and the connection is recycled.
+- Reconnection uses exponential backoff with jitter (1 s, 2 s, 4 s … up to 60 s), reset by the first valid sample. This keeps a rebooting server from seeing bursts of failed logins (OpenSSH `PerSourcePenalties`).
+- The collector exits by itself when its stdin reaches EOF or stdout breaks, so a dropped connection never leaves a process behind on the server.
+
+- **Close the window / `⌘W`:** keeps the app running with only the menu bar icon; click it to reopen the window. Terminal sessions are preserved. Monitoring pauses (the SSH connection is closed) ~10 s after the window is hidden, minimized or fully covered, and while the Mac sleeps; it reconnects when the window is visible again.
 - **Pause:** stops data collection while preserving terminal sessions. Reopening the window keeps monitoring paused.
-- **Refresh / `⌘R`:** resumes collection and immediately queries all groups.
+- **Refresh / `⌘R`:** reconnects and immediately collects all groups.
 - **Server → Disconnect all:** pauses monitoring, ends SSH sessions, and closes VM tunnels (VMs keep running).
 - **Power button / `⌘Q`:** quits the application and closes its connections.
 - **`⌘1` through `⌘6`:** switch between the main window's screens.
-
-In the menu bar, the GPU, Ollama, and services cards open their detail screens. Each VM has a row with its state and an **Open desktop** button; the row is hidden when there are no VMs. The footer provides refresh, pause, main dashboard, terminal, settings, and quit controls.
 
 ## Virtual machines
 
 <p>
   <img src="docs/images/vms.png" alt="VMs screen showing a shut-off Kali VM with vCPUs, memory, disk, readiness, and the Open desktop, Terminal SSH, and Start buttons" width="68%">
-  <img src="docs/images/menubar.png" alt="Menu bar dashboard with CPU, RAM, GPU, services, and a VM row with its state and an Open desktop button" width="26%">
 </p>
 
-The **VMs** screen lists every libvirt domain on `qemu:///system`. Nothing is hardcoded to a specific VM; each one gets its own settings (menu **⋯ → Configurar…**). Discovery reuses the monitoring SSH connection: a small Python helper (`vm.py`, sent like the collector and never installed) runs `virsh` on the server. The list refreshes every 15 s while monitoring is active, with one SSH process per refresh. The menu bar shows a row per VM with its state and an **Open desktop** button.
+The **VMs** screen lists every libvirt domain on `qemu:///system`. Nothing is hardcoded to a specific VM; each one gets its own settings (menu **⋯ → Configurar…**). Discovery reuses the monitoring SSH connection: a small Python helper (`vm.py`, sent like the collector and never installed) runs `virsh` on the server. The list refreshes every 15 s while monitoring is active, over the same persistent connection as the other metrics. Actions (start, shutdown, restart) still use a short one-shot SSH command.
 
 ### Host requirements (Ubuntu server)
 
@@ -273,7 +274,7 @@ This routine captures only the app's own screens, opens an SSH session, and chec
 ## Structure
 
 ```text
-Sources/Homelab/          Interface, menu bar, SSH sessions, and scheduling
+Sources/Homelab/          Interface, menu bar icon, SSH sessions, and stream supervision
 Sources/HomelabCore/      Connection, models, process execution, Python collector, libvirt helper, tunnels, and VM flows
 Tests/                   Swift and Python tests
 Resources/               Application metadata

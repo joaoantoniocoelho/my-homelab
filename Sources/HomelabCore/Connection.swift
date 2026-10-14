@@ -31,6 +31,12 @@ public struct Connection: Codable, Equatable, Sendable {
         return args
     }
 
+    /// One long-lived exec channel. stdin must stay open (never `-n`): the remote collector treats its EOF as "the app is gone".
+    public func streamArguments(command: String) -> [String] {
+        ["-p", String(port), "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", destination, command]
+    }
+
     public static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
